@@ -13,7 +13,7 @@ const app = express();
 
 app.use(
   cors({
-    origin: "*",
+    origin: ["http://localhost:3000","https://video-encoder-chi.vercel.app"],
     methods: ["POST", "GET"],
     allowedHeaders: ["Content-Type"],
   })
@@ -21,7 +21,7 @@ app.use(
 
 const upload = multer({
   limits: {
-    fileSize: 500 * 1024 * 1024, // 500MB limit
+    fileSize: 500 * 1024 * 1024, // 500MB limit cause we have limited computing power
   },
 });
 

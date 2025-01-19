@@ -80,6 +80,7 @@ export default function Home() {
           body: formData,
         }
       );
+      console.log(response)
 
       if (!response.ok) {
         const errorData = await response.json();
@@ -91,6 +92,7 @@ export default function Home() {
       // Convert base64 data to video URLs
       const videoUrls = {};
       for (const [resolution, data] of Object.entries(results)) {
+        console.log(data)
         if (data.error) {
           console.error(`Error for ${resolution}:`, data.error);
           continue;
