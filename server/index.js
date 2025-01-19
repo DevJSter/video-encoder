@@ -11,61 +11,57 @@ const unlinkAsync = promisify(fs.unlink);
 
 const app = express();
 
-// Enable CORS
 app.use(
   cors({
-    origin: "http://localhost:3000",
+    origin: "*",
     methods: ["POST", "GET"],
     allowedHeaders: ["Content-Type"],
   })
 );
 
-// Configure multer to store files in memory
 const upload = multer({
   limits: {
-    fileSize: 100 * 1024 * 1024, // 100MB limit
+    fileSize: 500 * 1024 * 1024, // 500MB limit
   },
 });
 
-// Create temp directory if it doesn't exist
 const tempDir = path.join(os.tmpdir(), "video-transcoder");
 if (!fs.existsSync(tempDir)) {
   fs.mkdirSync(tempDir);
 }
 
-// Define resolutions
 const RESOLUTIONS = {
-  "360p": { width: 640, height: 360 },
-  "720p": { width: 1280, height: 720 },
-  "1080p": { width: 1920, height: 1080 },
+  "360p": { width: 640, height: 360, bitrate: "800k" },
+  "720p": { width: 1280, height: 720, bitrate: "2500k" },
+  "1080p": { width: 1920, height: 1080, bitrate: "5000k" },
 };
 
-// Helper function to save buffer to temp file
 async function saveBufferToTemp(buffer) {
   const tempFilePath = path.join(tempDir, `input-${Date.now()}.mp4`);
   await writeFileAsync(tempFilePath, buffer);
   return tempFilePath;
 }
 
-// Helper function to transcode video
 function transcodeVideo(inputPath, resolution) {
   return new Promise((resolve, reject) => {
     const outputPath = path.join(
       tempDir,
       `output-${Date.now()}-${resolution}.mp4`
     );
-    const { width, height } = RESOLUTIONS[resolution];
+    const { width, height, bitrate } = RESOLUTIONS[resolution];
 
     ffmpeg(inputPath)
       .size(`${width}x${height}`)
+      .videoBitrate(bitrate)
       .format("mp4")
       .outputOptions([
         "-movflags frag_keyframe+empty_moov",
         "-c:v libx264",
         "-preset fast",
-        "-crf 22",
+        "-crf 23",
         "-c:a aac",
         "-b:a 128k",
+        "-profile:v high",
       ])
       .on("start", (commandLine) => {
         console.log(`Starting transcoding for ${resolution}: ${commandLine}`);
@@ -85,54 +81,92 @@ function transcodeVideo(inputPath, resolution) {
   });
 }
 
-// Single resolution transcoding endpoint
-app.post("/transcode", upload.single("video"), async (req, res) => {
+// Multi-resolution transcoding endpoint
+app.post("/transcode-multi", upload.single("video"), async (req, res) => {
   if (!req.file) {
     return res.status(400).json({ error: "No video file provided" });
   }
 
-  const resolution = req.query.resolution || "720p";
+  // Get requested resolutions from query params or use all
+  const requestedResolutions = req.query.resolutions
+    ? req.query.resolutions.split(",")
+    : Object.keys(RESOLUTIONS);
+
   let inputPath = null;
-  let outputPath = null;
+  const outputPaths = [];
+  const results = {};
 
   try {
-    // Save uploaded file to temp location
+    // Save uploaded file
     inputPath = await saveBufferToTemp(req.file.buffer);
     console.log("Saved input file to:", inputPath);
 
-    // Transcode the video
-    outputPath = await transcodeVideo(inputPath, resolution);
-    console.log("Transcoding completed, output at:", outputPath);
+    // Transcode to all requested resolutions
+    const transcodingPromises = requestedResolutions.map(async (resolution) => {
+      if (!RESOLUTIONS[resolution]) {
+        return { resolution, error: "Invalid resolution" };
+      }
 
-    // Stream the result back to client
-    res.setHeader("Content-Type", "video/mp4");
-    const fileStream = fs.createReadStream(outputPath);
-    fileStream.pipe(res);
-
-    // Clean up files after streaming
-    fileStream.on("end", async () => {
       try {
-        await unlinkAsync(inputPath);
-        await unlinkAsync(outputPath);
-        console.log("Cleaned up temporary files");
-      } catch (err) {
-        console.error("Error cleaning up files:", err);
+        const outputPath = await transcodeVideo(inputPath, resolution);
+        outputPaths.push(outputPath);
+
+        // Read file stats
+        const stats = await fs.promises.stat(outputPath);
+        const fileSize = stats.size;
+
+        // Create blob URL for frontend
+        return {
+          resolution,
+          path: outputPath,
+          size: fileSize,
+          status: "success",
+        };
+      } catch (error) {
+        return {
+          resolution,
+          error: error.message,
+          status: "error",
+        };
       }
     });
-  } catch (error) {
-    console.error("Error during transcoding:", error);
 
-    // Clean up files in case of error
-    try {
-      if (inputPath) await unlinkAsync(inputPath);
-      if (outputPath) await unlinkAsync(outputPath);
-    } catch (cleanupError) {
-      console.error("Error cleaning up files:", cleanupError);
+    // Wait for all transcoding to complete
+    const transcodingResults = await Promise.all(transcodingPromises);
+
+    // Stream results back as response
+    for (const result of transcodingResults) {
+      if (result.status === "success") {
+        // Read the file and convert to base64
+        const videoBuffer = await fs.promises.readFile(result.path);
+        results[result.resolution] = {
+          data: videoBuffer.toString("base64"),
+          size: result.size,
+          type: "video/mp4",
+        };
+      } else {
+        results[result.resolution] = {
+          error: result.error,
+        };
+      }
     }
 
+    res.json(results);
+  } catch (error) {
+    console.error("Error during transcoding:", error);
     res
       .status(500)
       .json({ error: "Transcoding failed", details: error.message });
+  } finally {
+    // Cleanup
+    try {
+      if (inputPath) await unlinkAsync(inputPath);
+      for (const path of outputPaths) {
+        await unlinkAsync(path);
+      }
+    } catch (cleanupError) {
+      console.error("Error cleaning up files:", cleanupError);
+    }
   }
 });
 
@@ -140,7 +174,7 @@ app.post("/transcode", upload.single("video"), async (req, res) => {
 app.use((error, req, res, next) => {
   if (error instanceof multer.MulterError) {
     if (error.code === "LIMIT_FILE_SIZE") {
-      return res.status(400).json({ error: "File too large (max 100MB)" });
+      return res.status(400).json({ error: "File too large (max 500MB)" });
     }
   }
   console.error("Server error:", error);
@@ -149,7 +183,7 @@ app.use((error, req, res, next) => {
     .json({ error: "Internal server error", details: error.message });
 });
 
-// Cleanup old temporary files periodically
+// Cleanup old temporary files
 setInterval(async () => {
   try {
     const files = await fs.promises.readdir(tempDir);
@@ -157,7 +191,6 @@ setInterval(async () => {
     for (const file of files) {
       const filePath = path.join(tempDir, file);
       const stats = await fs.promises.stat(filePath);
-      // Remove files older than 1 hour
       if (now - stats.mtime.getTime() > 60 * 60 * 1000) {
         await unlinkAsync(filePath);
         console.log("Cleaned up old file:", file);
@@ -166,7 +199,7 @@ setInterval(async () => {
   } catch (err) {
     console.error("Error during cleanup:", err);
   }
-}, 30 * 60 * 1000); // Run every 30 minutes
+}, 30 * 60 * 1000);
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {

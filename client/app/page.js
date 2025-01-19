@@ -1,19 +1,31 @@
 "use client";
 import { useState } from "react";
-import { Upload, Video, Settings, Loader2 } from "lucide-react";
+import { Upload, Video, Settings, Loader2, Check } from "lucide-react";
 
 export default function Home() {
   const [selectedFile, setSelectedFile] = useState(null);
-  const [videoURL, setVideoURL] = useState(null);
+  const [videos, setVideos] = useState({});
   const [processing, setProcessing] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [error, setError] = useState(null);
   const [progress, setProgress] = useState(0);
+  const [selectedQualities, setSelectedQualities] = useState({
+    "360p": false,
+    "720p": true,
+    "1080p": false,
+  });
+
+  const resolutionLabels = {
+    "360p": "SD (640x360)",
+    "720p": "HD (1280x720)",
+    "1080p": "Full HD (1920x1080)",
+  };
 
   const handleFileChange = (file) => {
     if (file && file.type.startsWith("video/")) {
       setSelectedFile(file);
       setError(null);
+      setVideos({});
     } else {
       setError("Please select a valid video file");
       setSelectedFile(null);
@@ -28,13 +40,11 @@ export default function Home() {
     }
   };
 
-  const handleDragOver = (e) => {
-    e.preventDefault();
-    setDragging(true);
-  };
-
-  const handleDragLeave = () => {
-    setDragging(false);
+  const handleQualityChange = (quality) => {
+    setSelectedQualities((prev) => ({
+      ...prev,
+      [quality]: !prev[quality],
+    }));
   };
 
   const handleUpload = async () => {
@@ -43,16 +53,28 @@ export default function Home() {
       return;
     }
 
+    const selectedResolutions = Object.entries(selectedQualities)
+      .filter(([_, selected]) => selected)
+      .map(([quality]) => quality);
+
+    if (selectedResolutions.length === 0) {
+      setError("Please select at least one quality.");
+      return;
+    }
+
     setProcessing(true);
     setError(null);
     setProgress(0);
+    setVideos({});
 
     const formData = new FormData();
     formData.append("video", selectedFile);
 
     try {
       const response = await fetch(
-        "http://localhost:5000/transcode?resolution=720p",
+        `http://localhost:5000/transcode-multi?resolutions=${selectedResolutions.join(
+          ","
+        )}`,
         {
           method: "POST",
           body: formData,
@@ -64,9 +86,26 @@ export default function Home() {
         throw new Error(errorData.error || "Transcoding failed");
       }
 
-      const blob = await response.blob();
-      const url = URL.createObjectURL(blob);
-      setVideoURL(url);
+      const results = await response.json();
+
+      // Convert base64 data to video URLs
+      const videoUrls = {};
+      for (const [resolution, data] of Object.entries(results)) {
+        if (data.error) {
+          console.error(`Error for ${resolution}:`, data.error);
+          continue;
+        }
+
+        const blob = await fetch(`data:video/mp4;base64,${data.data}`).then(
+          (r) => r.blob()
+        );
+        videoUrls[resolution] = {
+          url: URL.createObjectURL(blob),
+          size: data.size,
+        };
+      }
+
+      setVideos(videoUrls);
       setProgress(100);
     } catch (error) {
       console.error("Error during transcoding:", error);
@@ -85,10 +124,10 @@ export default function Home() {
         {/* Header */}
         <div className="text-center mb-12">
           <h1 className="text-5xl font-bold bg-gradient-to-r from-blue-600 to-purple-600 bg-clip-text text-transparent mb-4">
-            Video Transcoder
+            Video Transcoder Pro
           </h1>
           <p className="text-gray-600 text-xl">
-            Transform your videos with ease
+            Convert your videos to multiple qualities
           </p>
         </div>
 
@@ -104,8 +143,11 @@ export default function Home() {
           {/* Upload Area */}
           <div
             onDrop={handleDrop}
-            onDragOver={handleDragOver}
-            onDragLeave={handleDragLeave}
+            onDragOver={(e) => {
+              e.preventDefault();
+              setDragging(true);
+            }}
+            onDragLeave={() => setDragging(false)}
             className={`
               border-3 rounded-xl p-8 mb-6 transition-all duration-300
               ${
@@ -140,9 +182,38 @@ export default function Home() {
                     <p className="text-sm text-gray-500">
                       or click below to browse
                     </p>
+                    <p className="text-sm text-gray-500">
+                      500 MB max size LIMIT for now!!!
+                    </p>
                   </div>
                 )}
               </div>
+            </div>
+          </div>
+
+          {/* Quality Selection */}
+          <div className="mb-6">
+            <h3 className="text-lg font-medium text-gray-700 mb-3">
+              Select Output Qualities:
+            </h3>
+            <div className="flex flex-wrap gap-3">
+              {Object.entries(resolutionLabels).map(([quality, label]) => (
+                <button
+                  key={quality}
+                  onClick={() => handleQualityChange(quality)}
+                  className={`
+                    px-4 py-2 rounded-lg flex items-center gap-2 transition-all
+                    ${
+                      selectedQualities[quality]
+                        ? "bg-blue-100 text-blue-700 border border-blue-300"
+                        : "bg-gray-100 text-gray-600 border border-gray-200 hover:bg-gray-200"
+                    }
+                  `}
+                >
+                  {selectedQualities[quality] && <Check size={16} />}
+                  {label}
+                </button>
+              ))}
             </div>
           </div>
 
@@ -198,21 +269,31 @@ export default function Home() {
             </div>
           )}
 
-          {/* Video Preview */}
-          {videoURL && (
-            <div className="mt-8">
+          {/* Video Previews */}
+          {Object.keys(videos).length > 0 && (
+            <div className="space-y-8">
               <h2 className="text-2xl font-semibold text-gray-800 mb-6">
-                Transcoded Video
+                Transcoded Videos
               </h2>
-              <div className="bg-gray-50 p-6 rounded-xl">
-                <video
-                  controls
-                  className="w-full rounded-lg shadow-lg"
-                  src={videoURL}
-                >
-                  Your browser does not support the video tag.
-                </video>
-              </div>
+              {Object.entries(videos).map(([resolution, data]) => (
+                <div key={resolution} className="bg-gray-50 p-6 rounded-xl">
+                  <div className="flex justify-between items-center mb-4">
+                    <h3 className="text-lg font-medium text-gray-700">
+                      {resolutionLabels[resolution]}
+                    </h3>
+                    <span className="text-sm text-gray-500">
+                      Size: {(data.size / (1024 * 1024)).toFixed(2)} MB
+                    </span>
+                  </div>
+                  <video
+                    controls
+                    className="w-full rounded-lg shadow-lg"
+                    src={data.url}
+                  >
+                    Your browser does not support the video tag.
+                  </video>
+                </div>
+              ))}
             </div>
           )}
         </div>
